@@ -222,6 +222,8 @@ for next in $(xrandr --listmonitors | grep -E " *[0-9]+:.*" | cut -d" " -f6); do
 done
 '''
 
+MUTTER_UDEV_PATH='/etc/udev/rules.d/61-mutter-preferred-primary-gpu.rules'
+
 SUPPORTED_MODES = ['integrated', 'hybrid', 'nvidia']
 SUPPORTED_DISPLAY_MANAGERS = ['gdm', 'gdm3', 'sddm', 'lightdm']
 RTD3_MODES = [0, 1, 2, 3]
@@ -352,6 +354,8 @@ def graphics_mode_switcher(graphics_mode, user_display_manager, enable_force_com
             create_file(LIGHTDM_SCRIPT_PATH,
                         generate_xrandr_script(igpu_vendor), True)
             create_file(LIGHTDM_CONFIG_PATH, LIGHTDM_CONFIG_CONTENT)
+        elif display_manager == 'gdm':
+            create_mutter_rule
 
         rebuild_initramfs()
     print('Operation completed successfully')
@@ -369,6 +373,7 @@ def cleanup():
         MODESET_PATH,
         LIGHTDM_SCRIPT_PATH,
         LIGHTDM_CONFIG_PATH,
+        MUTTER_UDEV_PATH,
         # legacy files
         '/etc/X11/xorg.conf.d/90-nvidia.conf',
         '/lib/udev/rules.d/50-remove-nvidia.rules',
@@ -430,6 +435,35 @@ def get_igpu_vendor():
     logging.warning("Could not find Intel or AMD iGPU")
     return None
 
+def create_mutter_rule():
+    lspci_output = subprocess.check_output(['lspci', '-nn']).decode('utf-8')
+    for line in lspci_output.splitlines():
+        if 'NVIDIA' in line and ('VGA compatible controller' in line or '3D controller' in line):
+            match = re.search(r'\[([0-9a-fA-F]+:[0-9a-fA-F]+)\]', line)
+            if not match:
+                logging.error("Could not find device/vendor ID")
+                print("Could not find device/vendor ID")
+                sys.exit(1)
+
+            vendor_id, device_id = match.group(1).split(":")
+            try:
+                with open(MUTTER_UDEV_PATH, "w") as f:
+                    f.write('"SUBSYSTEM=="drm", ENV{DEVTYPE}=="drm_minor", ENV{DEVNAME}=="/dev/dri/card[0-9]", SUBSYSTEMS=="pci", ATTRS{vendor}=="')
+                    f.write('0x' + vendor_id)
+                    f.write('", ATTRS{device}=="')
+                    f.write('0x' + device_id)
+                    f.write('", TAG+="mutter-device-preferred-primary"\n')
+                subprocess.run(["udevadm", "control", "--reload-rules"], check=True)
+                subprocess.run(["udevadm", "trigger"], check=True)
+            except:
+                logging.error("Could not write mutter udev rules!")
+                print("Could not write mutter udev rules!")
+                sys.exit(1)
+            break
+    else:
+        logging.error("Could not find Nvidia GPU")
+        print("Try switching to hybrid mode first!")
+        sys.exit(1)
 
 def get_display_manager():
     try:
